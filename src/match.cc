@@ -16,282 +16,232 @@
  *****************************************************************************/
 
 #include <stdlib.h>
-#include <string.h>
+#include <string>
 #include <vector>
-#include <regex>
 
-#include "config.h"
 #include "db.h"
-#include "structures.h"
-#include "match.h"
-#include "parse_cmd.h"
-#include "storage.h"
-#include "unparse.h"
-#include "utils.h"
-#include "tasks.h"
 #include "list.h"
+#include "log.h"
+#include "match.h"
+#include "server.h"
+#include "utils.h"
 
-Var
-name_and_aliases(Objid player, Objid oid)
+#include <boost/algorithm/string.hpp>
+#include <boost/range/algorithm.hpp>
+#include <boost/range/adaptors.hpp>
+#include <rapidfuzz/fuzz.hpp>
+
+inline std::vector<std::string> 
+get_name(Objid oid) 
 {
-    Var results = new_list(1);
-    results.v.list[1] = str_dup_to_var(db_object_name(oid));
-
-    Var aliases;
-    db_prop_handle h;
-    h = db_find_property(Var::new_obj(oid), "aliases", &aliases);
-    if (!h.ptr || aliases.type != TYPE_LIST) {
-        // Do nothing it was an empty list.
-    } else {
-        results = listconcat(results, var_ref(aliases));
-    }
-    return results;
+    std::vector<std::string> tokens;
+    std::string name = db_object_name(oid);
+    return ts::string::explode(ts::string::tolowercase(name));
 }
 
-struct match_data {
-    Objid player;
-    Var targets;
-    Var keys;
-};
-
-static int
-match_proc(void *data, Objid oid)
+inline std::vector<std::string> 
+get_aliases(Objid oid) 
 {
-    struct match_data *d = (struct match_data *)data;
+    std::vector<std::string> tokens;
 
-    d->targets = listappend(d->targets, Var::new_obj(oid));
-    d->keys = listappend(d->keys, name_and_aliases(d->player, oid));
+    Var db_aliases;
+    db_prop_handle h = db_find_property(Var::new_obj(oid), "aliases", &db_aliases);
+    if (h.ptr && (db_aliases.type == TYPE_LIST || db_aliases.type == TYPE_STR))
+        tokens = ts::string::explode(ts::string::tolowercase(ts::string::join(ts::var::var_to_vector(db_aliases))));
 
-    return 0;
+    return tokens; 
 }
 
-Objid
-match_object(Objid player, const char *name)
+std::vector<Objid> 
+get_contents(Objid oid) 
 {
-    if (name[0] == '\0')
+    std::vector<Objid> stuff;
+
+    if (!valid(oid)) return stuff;
+
+    Var contents;
+    db_prop_handle h = db_find_property(Var::new_obj(oid), "contents", &contents);
+    if(h.ptr && contents.v.list[0].v.num > 0)
+        for(auto c=1; c<=contents.v.list[0].v.num; c++)
+            stuff.emplace_back(contents.v.list[c].v.obj);
+
+    return stuff;
+}
+
+std::vector<Objid> 
+nearby_objects(Objid where) 
+{
+    int step;
+    Objid oid, loc;
+    loc = db_object_location(where);
+
+    std::vector<Objid> contents;
+
+    if(valid(loc))
+        contents = ts::utils::merge_unique<Objid>(get_contents(where), get_contents(loc));
+    else
+        contents = get_contents(where);
+
+    return contents;
+}
+
+inline 
+std::string name_and_aliases(Objid oid)
+{
+    std::vector<std::string> name_and_aliases = ts::utils::merge_unique<std::string>(get_name(oid), get_aliases(oid));
+    return ts::string::join(name_and_aliases);
+}
+
+Objid 
+match_object(Objid player, const char *name, Var *object_list)
+{
+    std::string search_name = name;
+
+    if (search_name.empty())
         return NOTHING;
-    if (name[0] == '#' && is_wizard(player)) {
-        char *p;
-        Objid r = strtol(name + 1, &p, 10);
-
-        if (*p != '\0' || !valid(r))
-            return FAILED_MATCH;
+    if (search_name[0] == '#' && is_wizard(player)) {
+        Objid r;
+        r = static_cast<Objid>(std::stoi(search_name.substr(1, search_name.size()-1)));
+        if(!valid(r)) return FAILED_MATCH;
         return r;
     }
+
     if (!valid(player))
         return FAILED_MATCH;
-    if (!strcasecmp(name, "me"))
+    if (search_name == "me" || search_name == "myself")
         return player;
-    if (!strcasecmp(name, "here"))
+    if (search_name == "here")
         return db_object_location(player);
-        
-    int step;
-    Objid oid;
-    Objid loc = db_object_location(player);
-    struct match_data d = {player, new_list(0), new_list(0)};
-    d.player = player;
-    for (oid = player, step = 0; step < 2; oid = loc, step++) {
-        if (!valid(oid))
-            continue;
-        db_for_all_contents(oid, match_proc, &d);
+
+    std::vector<std::string> targets;
+    std::vector<Objid> contents = nearby_objects(player);
+
+    targets.reserve(contents.size());
+
+    for(auto& o: contents) {
+        if(!valid(o)) continue;
+        targets.emplace_back(name_and_aliases(o));
     }
-    
-    std::vector<int> matches = complex_match(name, &d.keys);
-    Objid result = AMBIGUOUS;
-    if (matches.size() <= 0) {
-        result = FAILED_MATCH;
-    } else if (matches.size() == 1) {
-        result = d.targets.v.list[matches.back()].v.obj;
+
+    targets.shrink_to_fit();
+
+    std::vector<int> matches = complex_match(search_name, targets, server_int_option("match_threshold", 70));
+
+    int n_matches = matches.size();
+
+    if (n_matches == 1) 
+        return contents[matches.front()];
+    else if (n_matches <= 0) 
+        return FAILED_MATCH;
+    else
+        return AMBIGUOUS;
+}
+
+std::pair<int, std::string> 
+parse_ordinal(std::string word) 
+{
+    if (auto search = english_ordinals.find(word); search != english_ordinals.end()) {
+        return std::make_pair(search->second, "");
     }
+
+    std::pair<int, std::string> result = std::make_pair(FAILED_MATCH, word);
     
-    free_var(d.keys);
-    free_var(d.targets);
+    std::smatch sm;
+
+    if (std::regex_search(word, sm, match_numeric) && sm.size() > 1) {
+        try { // Matching for 1.thing, 2.thing, etc.
+            result = std::make_pair(std::stoi(sm.str(1)), word.substr(sm.str(0).size()));
+        } catch (...) { }
+    }
+
+    if (std::regex_search(word, sm, match_ordinal) && sm.size() > 1) {
+        try { // Third order matching, try matching 1st, etc.
+            result = std::make_pair(std::stoi(sm.str(1)), "");
+        } catch (...) { }
+    }
+
     return result;
 }
 
-#define NUM_ORDINALS 19
-#define MAX_ORDINAL_STRINGS 4
-int findOrdinalIndex(const char* str, const char* ordinals[NUM_ORDINALS][MAX_ORDINAL_STRINGS]) {
-    for (int i = 0; i < NUM_ORDINALS; ++i) {
-        for (int j = 0; ordinals[i][j] != NULL; ++j) {
-            if (!strcasecmp(str, ordinals[i][j])) {
-                return i;
-            }
-        }
+bool 
+token_match(Objid *match, Objid speaker, const char *token, std::vector<Objid> oids) 
+{
+    auto n = oids.size();
+
+    if(n == 0) return false;
+
+    Var objects = ts::var::vec_to_list<Objid>(oids);
+
+    Objid res;
+    res = match_object(speaker, token, &objects);
+
+    if(valid(res)) {
+      *match = res;
+      return true;
     }
-    return -1;  // Return -1 if no match is found
+
+    return false;
 }
 
-const char* ordinals[NUM_ORDINALS][MAX_ORDINAL_STRINGS] = {
-    {"first", NULL},
-    {"second", "twenty", "twentieth", NULL},
-    {"third", "thirty", "thirtieth", NULL},
-    {"fourth", "fourtieth", "fourty", NULL},
-    {"fifth", "fiftieth", "fifty", NULL},
-    {"sixth", "sixtieth", "sixty", NULL},
-    {"seventh", "seventieth", "seventy", NULL},
-    {"eighth", "eightieth", "eighty", NULL},
-    {"ninth", "ninetieth", "ninty", NULL},
-    {"tenth", NULL},
-    {"eleventh", NULL},
-    {"twelth", NULL},
-    {"thirteenth", NULL},
-    {"fourteenth", NULL},
-    {"fifteenth", NULL},
-    {"sixteenth", NULL},
-    {"seventeeth", NULL},
-    {"eighteenth", NULL},
-    {"nineteenth", NULL}
-};
+static inline double 
+fuzzy_match_score(std::string subject, std::string target)
+{
+    double token_ratio, token_sort, token_set, score;
 
-int
-parse_ordinal(const char* word) {
-    const std::regex e ("(\\d+)(th|st|nd|rd)");
+    token_ratio = rapidfuzz::fuzz::ratio(subject, target);
+    token_sort  = rapidfuzz::fuzz::partial_token_sort_ratio(subject, target);
+    token_set   = rapidfuzz::fuzz::token_set_ratio(subject, target);
 
-    // First order of operations is to split up the ordinal into tokens.
-    Var tokens = new_list(0);
-    char *found, *return_string, *freeme;
-    freeme = return_string = strdup(word);
-    found = strtok(return_string, "-");
-    while (found != nullptr) {
-        tokens = listappend(tokens, str_dup_to_var(found));
-        found = strtok(nullptr, "-");
-    }
+    score = std::ceil(RMS_BEST2(token_ratio, token_set, token_sort));
 
-    std::vector<int> ordinalTokens;
-    for (int i=1;i <= tokens.v.list[0].v.num;i++) {
-        // Easiest matching: 1. 2. etc.
-        Var token = tokens.v.list[i];
+    #if MATCH_DEBUG > 0
+    oklog("%s <=> %s [%f %f %f] %f\n", subject.c_str(), target.c_str(), token_ratio, token_set, token_sort, score);
+    #endif 
 
-        if (memo_strlen(token.v.str) > 1 && token.v.str[memo_strlen(token.v.str) - 1] == '.') {
-            try {
-                ordinalTokens.push_back(atoi(strndup(token.v.str, memo_strlen(token.v.str) - 2)));
-            } catch (...) {
-                free_var(tokens);
-                free(freeme);
-                return FAILED_MATCH;
-            }
-        }
-
-        // Brute force ordinal matching
-        int ordinalIndex = findOrdinalIndex(token.v.str, ordinals);
-        if (ordinalIndex != -1) {
-            ordinalTokens.push_back(ordinalIndex + 1);
-            continue;
-        }
-        
-        // Third order matching, try matching 1st, etc.
-        std::smatch sm;
-        std::string str(token.v.str);
-        if (std::regex_search(str, sm, e) && sm.size() > 1) {
-            try {
-                ordinalTokens.push_back(std::stoi(sm.str(1)));
-            } catch (...) {
-                free_var(tokens);
-                free(freeme);
-                return FAILED_MATCH;
-            }
-        }
-    }
-
-    int ordinal;
-    if (ordinalTokens.size() == 1) {
-        free_var(tokens);
-        free(freeme);
-        return ordinalTokens[0];
-    } else if (ordinalTokens.size() == 2) {
-        ordinal = ordinalTokens[0] * 10;
-        ordinal = ordinal + ordinalTokens[1];
-        free_var(tokens);
-        free(freeme);
-        return ordinal;
-    }
-    free_var(tokens);
-    free(freeme);
-    return FAILED_MATCH;
+    return score;
 }
 
-std::vector<int>
-complex_match(const char* inputSubject, Var *targets) {
-    // Guard check for no targets
-    if (targets->v.list[0].v.num <= 0) return {};
+std::vector<int> 
+fuzzy_match(std::string subject, std::vector<std::string> targets, double threshold, bool use_ordinal)
+{
+    auto sz = targets.size();
+    std::vector<int> matches;
+    
+    if (sz <= 0) return matches;
 
-    Var subjectWords = new_list(0);
-    char *found, *return_string, *freeme;
-    freeme = return_string = strdup(inputSubject);
-    found = strtok(return_string, " ");
-    while (found != nullptr) {
-        subjectWords = listappend(subjectWords, str_dup_to_var(found));
-        found = strtok(nullptr, " ");
-    }
-    // Guard check for no subject
-    if (subjectWords.v.list[0].v.num <= 0) {
-        free_var(subjectWords);
-        free(freeme);
-        return {};
-    }
+    matches.reserve(sz);
 
-    // Ordinal matches 
-    int ordinal = parse_ordinal(subjectWords.v.list[1].v.str);
-    const char* subject = str_dup(inputSubject);
-    if (ordinal <= 0)  {
-        // Safety in case ordinal didn't match
-        ordinal = 0; 
+    int ordinal = 0;
+
+    std::string match_subject;    
+    if(!use_ordinal) {
+        match_subject = subject;
     } else {
-        subjectWords = listdelete(subjectWords, 1);
-        if (subjectWords.v.list[0].v.num <= 0) return {};
-        // subject = boost::algorithm::join(subjectWords, " ");
-        Stream* s = new_stream(100);
-        for (int i=1; i <= subjectWords.v.list[0].v.num; i++) {
-            stream_add_string(s, subjectWords.v.list[i].v.str);
-            if (i < subjectWords.v.list[0].v.num) stream_add_char(s, ' ');
-        }
-        subject = str_dup(stream_contents(s));
-        free_stream(s);
+        std::vector<std::string> tokens = ts::string::explode(subject);
+        std::tie(ordinal, tokens[0])    = parse_ordinal(tokens[0]);
+
+        if(tokens[0] == "") tokens.erase(tokens.begin());
+        match_subject = ts::string::join(tokens);
     }
 
-    // Clear up this since we don't need it anymore...
-    free_var(subjectWords);
-    free(freeme);
-    
-    std::vector<int> exactMatches, startMatches, containMatches;
-    
-    for(int i = 1; i <= targets->v.list[0].v.num; i++) {
-        for(int i2 = 1 ; i2 <= targets->v.list[i].v.list[0].v.num; i2++) {
-            const char* alias = targets->v.list[i].v.list[i2].v.str;
-            
-            bool found_match = false;
-            if(!strcasecmp(subject, alias)) {
-                if (ordinal > 0 && ordinal == (exactMatches.size() + 1)) {
-                    return {i};
-                }
-                exactMatches.push_back(i);
-                found_match = true;
-            } 
-            
-            if (strindex(alias, memo_strlen(alias), subject, memo_strlen(subject), 0) == 1) {
-                startMatches.push_back(i);
-                found_match = true;
-            }
-            
-            if (strindex(alias, memo_strlen(alias), subject, memo_strlen(subject), 0) >= 1) {
-                containMatches.push_back(i);
-                found_match = true;
-            }
+    for(int i = 0; i < targets.size(); i++)
+        if(fuzzy_match_score(match_subject, targets[i]) >= threshold) matches.emplace_back(i);
 
-            if (found_match) break;
-        }
-    }
-    
-    if (ordinal > 0) {
-        if(ordinal <= exactMatches.size()) return {exactMatches[ordinal - 1]};
-        if(ordinal <= startMatches.size()) return {startMatches[ordinal - 1]};
-        if(ordinal <= containMatches.size()) return {containMatches[ordinal - 1]};
-        return {};
+    if(ordinal > 0) {
+        if(ordinal > matches.size()) return fuzzy_match(subject, targets, threshold, false);
+        int match = matches[ordinal - 1];
+        matches.clear();
+        matches.emplace_back(match);
     }
 
-    if(exactMatches.size() > 0) return exactMatches;
-    if(startMatches.size() > 0) return startMatches;
-    if(containMatches.size() > 0) return containMatches;
-    return {};
+    matches.shrink_to_fit();
+
+    return matches;
+}
+
+std::vector<int> 
+complex_match(std::string subject, std::vector<std::string> targets, int threshold)
+{
+    std::vector<int> matches = fuzzy_match(subject, targets, CLAMP100(threshold), true);
+    return matches;
 }

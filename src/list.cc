@@ -20,8 +20,8 @@
 #include <algorithm> // std::sort
 #include "dependencies/strnatcmp.c" // natural sorting
 #include <vector>
-#include <regex>
 #include <unordered_map>
+#include <boost/algorithm/string.hpp>
 
 #include <ctype.h>
 #include <string.h>
@@ -787,28 +787,29 @@ bf_equal(Var arglist, Byte next, void *vdata, Objid progr)
 static package
 bf_explode(Var arglist, Byte next, void *vdata, Objid progr)
 {
-    const int nargs = arglist.v.list[0].v.num;
-    const bool adjacent_delim = (nargs > 2 && is_true(arglist.v.list[3]));
-    char delim[2];
-    delim[0] = (nargs > 1 && memo_strlen(arglist.v.list[2].v.str) > 0) ? arglist.v.list[2].v.str[0] : ' ';
-    delim[1] = '\0';
-    char *found, *return_string, *freeme;
-    Var ret = new_list(0);
+    auto nargs           = arglist.v.list[0].v.num;
+    std::string_view str = arglist.v.list[1].v.str;
+    std::string_view sep = nargs >= 2 ? arglist.v.list[2].v.str : " ";
+    auto mode            = nargs >= 3 ? arglist.v.list[3].v.num : 0;
 
-    freeme = return_string = strdup(arglist.v.list[1].v.str);
+    Var ret = ts::string::vec_to_list(ts::string::explode(str, sep), mode);
+    
+    free_var(arglist);
+    return make_var_pack(ret);
+}
+
+static package 
+bf_trim(Var arglist, Byte next, void *vdata, Objid progr)
+{
+    auto nargs             = arglist.v.list[0].v.num;
+    std::string str        = arglist.v.list[1].v.str;
+    std::string_view delim = nargs >= 2 ? arglist.v.list[2].v.str : " ";
+ 
+    str = ts::string::trim(str, delim);
+    Var ret = str_dup_to_var(str.data());
+
     free_var(arglist);
 
-    if (adjacent_delim) {
-        while ((found = strsep(&return_string, delim)) != nullptr)
-            ret = listappend(ret, str_dup_to_var(found));
-    } else {
-        found = strtok(return_string, delim);
-        while (found != nullptr) {
-            ret = listappend(ret, str_dup_to_var(found));
-            found = strtok(nullptr, delim);
-        }
-    }
-    free(freeme);
     return make_var_pack(ret);
 }
 
@@ -1038,203 +1039,6 @@ bf_all_members(Var arglist, Byte next, void *vdata, Objid progr)
     return background_thread(all_members_thread_callback, &arglist, human_string);
 }
 
-static const std::vector<std::regex> UNCOUNTABLE_RULES = {
-    std::regex("adulthood"), std::regex("advice"), std::regex("agenda"),
-    std::regex("aid"), std::regex("aircraft"), std::regex("alcohol"),
-    std::regex("ammo"), std::regex("analytics"), std::regex("anime"),
-    std::regex("athletics"), std::regex("audio"), std::regex("bison"),
-    std::regex("blood"), std::regex("bream"), std::regex("buffalo"),
-    std::regex("butter"), std::regex("carp"), std::regex("cash"),
-    std::regex("chassis"), std::regex("chess"), std::regex("clothing"),
-    std::regex("cod"), std::regex("commerce"), std::regex("cooperation"),
-    std::regex("corps"), std::regex("debris"), std::regex("diabetes"),
-    std::regex("digestion"), std::regex("elk"), std::regex("energy"),
-    std::regex("equipment"), std::regex("excretion"), std::regex("expertise"),
-    std::regex("firmware"), std::regex("flounder"), std::regex("fun"),
-    std::regex("gallows"), std::regex("garbage"), std::regex("graffiti"),
-    std::regex("hardware"), std::regex("headquarters"), std::regex("health"),
-    std::regex("herpes"), std::regex("highjinks"), std::regex("homework"),
-    std::regex("housework"), std::regex("information"), std::regex("jeans"),
-    std::regex("justice"), std::regex("kudos"), std::regex("labour"),
-    std::regex("literature"), std::regex("machinery"), std::regex("mackerel"),
-    std::regex("mail"), std::regex("media"), std::regex("mews"),
-    std::regex("moose"), std::regex("music"), std::regex("mud"),
-    std::regex("manga"), std::regex("news"), std::regex("only"),
-    std::regex("personnel"), std::regex("pike"), std::regex("plankton"),
-    std::regex("pliers"), std::regex("police"), std::regex("pollution"),
-    std::regex("premises"), std::regex("rain"), std::regex("research"),
-    std::regex("rice"), std::regex("salmon"), std::regex("scissors"),
-    std::regex("series"), std::regex("sewage"), std::regex("shambles"),
-    std::regex("shrimp"), std::regex("software"), std::regex("staff"),
-    std::regex("swine"), std::regex("tennis"), std::regex("traffic"),
-    std::regex("transportation"), std::regex("trout"), std::regex("tuna"),
-    std::regex("wealth"), std::regex("welfare"), std::regex("whiting"),
-    std::regex("wildebeest"), std::regex("wildlife"), std::regex("you"),
-    std::regex("pok[e]mon$"), std::regex("[^aeiou]ese$"), std::regex("deer$"),
-    std::regex("fish$"), std::regex("measles$"), std::regex("o[iu]s$")
-};
-
-static const std::map<std::string, std::string> IRREGULAR_SINGULAR_RULES = {
-    { "anathema", "anathemata" },
-    { "axe", "axes" },
-    { "canvas", "canvases" },
-    { "carve", "carves" },
-    { "die", "dice" },
-    { "dingo", "dingoes" },
-    { "dogma", "dogmata" },
-    { "eave", "eaves" },
-    { "echo", "echoes" },
-    { "foot", "feet" },
-    { "genus", "genera" },
-    { "go", "goes" },
-    { "goose", "geese" },
-    { "groove", "grooves" },
-    { "has", "have" },
-    { "he", "they" },
-    { "her", "their" },
-    { "herself", "themselves" },
-    { "himself", "themselves" },
-    { "his", "their" },
-    { "human", "humans" },
-    { "I", "we" },
-    { "is", "are" },
-    { "its", "their" },
-    { "itself", "themselves" },
-    { "lemma", "lemmata" },
-    { "looey", "looies" },
-    { "me", "us" },
-    { "my", "our" },
-    { "myself", "ourselves" },
-    { "ox", "oxen" },
-    { "passerby", "passersby" },
-    { "pickaxe", "pickaxes" },
-    { "proof", "proofs" },
-    { "quiz", "quizzes" },
-    { "schema", "schemata" },
-    { "she", "they" },
-    { "stigma", "stigmata" },
-    { "stoma", "stomata" },
-    { "that", "those" },
-    { "them", "them" },
-    { "themself", "themselves" },
-    { "thief", "thieves" },
-    { "this", "these" },
-    { "tooth", "teeth" },
-    { "tornado", "tornadoes" },
-    { "torpedo", "torpedoes" },
-    { "valve", "valves" },
-    { "viscus", "viscera" },
-    { "volcano", "volcanoes" },
-    { "was", "were" },
-    { "yes", "yeses" },
-    { "yourself", "yourselves" },
-};
-
-static const std::map<std::string, std::string> IRREGULAR_PLURAL_RULES = {
-    { "anathemata", "anathema" },
-    { "are", "is" },
-    { "axes", "axe" },
-    { "canvases", "canvas" },
-    { "carves", "carve" },
-    { "dice", "die" },
-    { "dingoes", "dingo" },
-    { "dogmata", "dogma" },
-    { "eaves", "eave" },
-    { "echoes", "echo" },
-    { "feet", "foot" },
-    { "geese", "goose" },
-    { "genera", "genus" },
-    { "goes", "go" },
-    { "grooves", "groove" },
-    { "have", "has" },
-    { "humans", "human" },
-    { "lemmata", "lemma" },
-    { "looies", "looey" },
-    { "our", "my" },
-    { "ourselves", "myself" },
-    { "oxen", "ox" },
-    { "passersby", "passerby" },
-    { "pickaxes", "pickaxe" },
-    { "proofs", "proof" },
-    { "quizzes", "quiz" },
-    { "schemata", "schema" },
-    { "stigmata", "stigma" },
-    { "stomata", "stoma" },
-    { "teeth", "tooth" },
-    { "their", "its" },
-    { "them", "them" },
-    { "themselves", "themself" },
-    { "these", "this" },
-    { "they", "she" },
-    { "thieves", "thief" },
-    { "those", "that" },
-    { "tornadoes", "tornado" },
-    { "torpedoes", "torpedo" },
-    { "us", "me" },
-    { "valves", "valve" },
-    { "viscera", "viscus" },
-    { "volcanoes", "volcano" },
-    { "we", "I" },
-    { "were", "was" },
-    { "yeses", "yes" },
-    { "yourselves", "yourself" }
-};
-
-static const std::vector<std::tuple<std::regex, std::string>> SINGULARIZATION_RULES = {
-    std::tuple<std::regex, std::string>( std::regex("(agend|addend|millenni|dat|extrem|bacteri|desiderat|strat|candelabr|errat|ov|symposi|curricul|quor)a$"), "$1um" ),
-    std::tuple<std::regex, std::string>( std::regex("(alumn|alg|vertebr)ae$"), "$1a" ),
-    std::tuple<std::regex, std::string>( std::regex("(alumn|syllab|vir|radi|nucle|fung|cact|stimul|termin|bacill|foc|uter|loc|strat)(?:us|i)$"), "$1us" ),
-    std::tuple<std::regex, std::string>( std::regex("(analy|diagno|parenthe|progno|synop|the|empha|cri|ne)(?:sis|ses)$"), "$1sis" ),
-    std::tuple<std::regex, std::string>( std::regex("(apheli|hyperbat|periheli|asyndet|noumen|phenomen|criteri|organ|prolegomen|hedr|automat)a$"), "$1on" ),
-    std::tuple<std::regex, std::string>( std::regex("(ar|(?:wo|[ae])l|[eo][ao])ves$"), "$1f" ),
-    std::tuple<std::regex, std::string>( std::regex("(child)ren$"), "$1" ),
-    std::tuple<std::regex, std::string>( std::regex("(cod|mur|sil|vert|ind)ices$"), "$1ex" ),
-    std::tuple<std::regex, std::string>( std::regex("(dg|ss|ois|lk|ok|wn|mb|th|ch|ec|oal|is|ck|ix|sser|ts|wb)ies$"), "$1ie" ),
-    std::tuple<std::regex, std::string>( std::regex("(eau)x?$"), "$1" ),
-    std::tuple<std::regex, std::string>( std::regex("(matr|append)ices$"), "$1ix" ),
-    std::tuple<std::regex, std::string>( std::regex("(movie|twelve|abuse|e[mn]u)s$"), "$1" ),
-    std::tuple<std::regex, std::string>( std::regex("(pe)(rson|ople)$"), "$1rson" ),
-    std::tuple<std::regex, std::string>( std::regex("(seraph|cherub)im$"), "$1" ),
-    std::tuple<std::regex, std::string>( std::regex("(ss)$"), "$1" ),
-    std::tuple<std::regex, std::string>( std::regex("(test)(?:is|es)$"), "$1is" ),
-    std::tuple<std::regex, std::string>( std::regex("(wi|kni|(?:after|half|high|low|mid|non|night|[^w]|^)li)ves$"), "$1fe" ),
-    std::tuple<std::regex, std::string>( std::regex("(x|ch|ss|sh|zz|tto|go|cho|alias|[^aou]us|t[lm]as|gas|(?:her|at|gr)o|[aeiou]ris)(?:es)?$"), "$1" ),
-    std::tuple<std::regex, std::string>( std::regex("b((?:tit)?m|l)ice$"), "$1ouse" ),
-    std::tuple<std::regex, std::string>( std::regex("b(l|(?:neck|cross|hog|aun)?t|coll|faer|food|gen|goon|group|hipp|junk|vegg|(?:pork)?p|charl|calor|cut)ies$"), "$1ie" ),
-    std::tuple<std::regex, std::string>( std::regex("b(mon|smil)ies$"), "$1ey" ),
-    std::tuple<std::regex, std::string>( std::regex("ies$"), "y" ),
-    std::tuple<std::regex, std::string>( std::regex("men$"), "man" ),
-    std::tuple<std::regex, std::string>( std::regex("s$"), "" )
-};
-
-static const std::vector<std::tuple<std::regex, std::string>> PLURALIZATION_RULES = {
-    std::tuple<std::regex, std::string>( std::regex("(?:(kni|wi|li)fe|(ar|l|ea|eo|oa|hoo)f)$"), "$1$2ves" ),
-    std::tuple<std::regex, std::string>( std::regex("([^aeiou]ese)$"), "$1" ),
-    std::tuple<std::regex, std::string>( std::regex("([^aeiouy]|qu)y$"), "$1ies" ),
-    std::tuple<std::regex, std::string>( std::regex("([^ch][ieo][ln])ey$"), "$1ies" ),
-    std::tuple<std::regex, std::string>( std::regex("([^l]ias|[aeiou]las|[ejzr]as|[iu]am)$"), "$1" ),
-    std::tuple<std::regex, std::string>( std::regex("(agend|addend|millenni|dat|extrem|bacteri|desiderat|strat|candelabr|errat|ov|symposi|curricul|automat|quor)(?:a|um)$"), "$1a" ),
-    std::tuple<std::regex, std::string>( std::regex("(alias|[^aou]us|t[lm]as|gas|ris)$"), "$1es" ),
-    std::tuple<std::regex, std::string>( std::regex("(alumn|alg|vertebr)(?:a|ae)$"), "$1ae" ),
-    std::tuple<std::regex, std::string>( std::regex("(alumn|syllab|vir|radi|nucle|fung|cact|stimul|termin|bacill|foc|uter|loc|strat)(?:us|i)$"), "$1i" ),
-    std::tuple<std::regex, std::string>( std::regex("(apheli|hyperbat|periheli|asyndet|noumen|phenomen|criteri|organ|prolegomen|hedr|automat)(?:a|on)$"), "$1a" ),
-    std::tuple<std::regex, std::string>( std::regex("(ax|test)is$"), "$1es" ),
-    std::tuple<std::regex, std::string>( std::regex("(child)(?:ren)?$"), "$1ren" ),
-    std::tuple<std::regex, std::string>( std::regex("(e[mn]u)s?$"), "$1s" ),
-    std::tuple<std::regex, std::string>( std::regex("(her|at|gr)o$"), "$1oes" ),
-    std::tuple<std::regex, std::string>( std::regex("(matr|cod|mur|sil|vert|ind|append)(?:ix|ex)$"), "$1ices" ),
-    std::tuple<std::regex, std::string>( std::regex("(pe)(?:rson|ople)$"), "$1ople" ),
-    std::tuple<std::regex, std::string>( std::regex("(seraph|cherub)(?:im)?$"), "$1im" ),
-    std::tuple<std::regex, std::string>( std::regex("(x|ch|ss|sh|zz)$"), "$1es" ),
-    std::tuple<std::regex, std::string>( std::regex("[^u0000-u007F]$"), "$0" ),
-    std::tuple<std::regex, std::string>( std::regex("b((?:tit)?m|l)(?:ice|ouse)$"), "$1ice" ),
-    std::tuple<std::regex, std::string>( std::regex("eaux$"), "$0" ),
-    std::tuple<std::regex, std::string>( std::regex("m[ae]n$"), "men" ),
-    std::tuple<std::regex, std::string>( std::regex("s?$"), "s" ),
-    std::tuple<std::regex, std::string>( std::regex("sisi"), "ses" ),
-    std::tuple<std::regex, std::string>( std::regex("thou"), "you" )
-};
-
 static package
 bf_pluralize(Var arglist, Byte next, void *vdata, Objid progr)
 {
@@ -1244,7 +1048,7 @@ bf_pluralize(Var arglist, Byte next, void *vdata, Objid progr)
     int quantity = 1;
     if (arglist.v.list[0].v.num == 2)
       quantity = arglist.v.list[2].v.num;
-    std::string token = std::string(arglist.v.list[1].v.str);
+    std::string token = boost::algorithm::to_lower_copy(std::string(arglist.v.list[1].v.str));
 
     // check for uncountables
     for (const std::regex &rule : UNCOUNTABLE_RULES) {
@@ -1305,74 +1109,108 @@ bf_pluralize(Var arglist, Byte next, void *vdata, Objid progr)
     return make_var_pack(r);
 }
 
-
-static Var
-compile_keys(Var *targets)
-{
-    Var keys = new_list(0);
-    Var target_keys;
-    for (int i = 1; i <= targets->v.list[0].v.num; i++) {
-        switch(targets->v.list[i].type) {
-            case TYPE_STR:
-                target_keys = new_list(1);
-                target_keys.v.list[1] = str_dup_to_var(targets->v.list[i].v.str);
-                keys = listappend(keys, target_keys);
-                break;
-            case TYPE_OBJ:
-                keys = listappend(keys, name_and_aliases(NOTHING, targets->v.list[i].v.obj));
-                break;
-            case TYPE_LIST:
-                target_keys = new_list(targets->v.list[i].v.list[0].v.num);
-                for (int i2 = 1; i2 <= target_keys.v.list[0].v.num; i2++) {
-                    switch (targets->v.list[i].v.list[i2].type) {
-                        case TYPE_STR:
-                            target_keys.v.list[i2] = str_dup_to_var(targets->v.list[i].v.list[i2].v.str);
-                            break;
-                        default:
-                            free_var(target_keys);
-                            free_var(keys);
-                            keys = new_list(0);
-                            return keys;
-                    }
-                }
-                keys = listappend(keys, target_keys);
-                break;
-            default:
-                free_var(keys);
-                keys = new_list(0);
-                return keys;
-        }
-    }
-    return keys;
-}
-
 static package
 bf_complex_match(Var arglist, Byte next, void *vdata, Objid progr)
 {   /* (subject, targets [, keys]) */
+    auto nargs = arglist.v.list[0].v.num;
+    std::vector<std::string> keys;
 
-    if (arglist.v.list[0].v.num == 3) {
+    if (nargs >= 3) {
         // There must be as many keys as there are targets.
         if (arglist.v.list[3].v.list[0].v.num != arglist.v.list[2].v.list[0].v.num) {
             free_var(arglist);
             return make_error_pack(E_INVARG);
         }
+        // Compile our keys...
+        for (int i = 1; i <= arglist.v.list[3].v.list[0].v.num; i++) {
+            switch(arglist.v.list[3].v.list[i].type) {
+                case TYPE_STR:
+                    keys.push_back(std::string(arglist.v.list[3].v.list[i].v.str));
+                    break;
+                case TYPE_LIST:
+                    // Someone in the future look at this and go 'what the fuck is actually happening here'
+                    // ..possibly me..
+                    // TL;DR we support lists of lists to alias one key result to multiple strings
+                    // meaning one index target can have multiple strings that will match to it
+                    // this lets things like .aliases work.
+                    for (int x = 1; x <= arglist.v.list[3].v.list[i].v.list[0].v.num; x++) {
+                        if (arglist.v.list[3].v.list[i].v.list[x].type != TYPE_STR) {
+                            free_var(arglist);
+                            return make_error_pack(E_INVARG);
+                        }
+                        keys.push_back(std::string(arglist.v.list[3].v.list[i].v.str));
+                    }
+                    break;
+                default:
+                    free_var(arglist);
+                    return make_error_pack(E_INVARG);
+            }
+        }
+    } else {
+        // We have to calculate what the likely keys are based on the targets.
+        Var *names;
+        for (int i = 1; i <= arglist.v.list[2].v.list[0].v.num; i++) {
+            // If it's an object we'll use their aliases
+            // if it's a string we can assume it's the string itself.
+            switch (arglist.v.list[2].v.list[i].type) {
+                case TYPE_STR:
+                    keys.push_back(std::string(arglist.v.list[2].v.list[i].v.str));
+
+                    break;
+                // case TYPE_OBJ:
+                //     names = aliases(arglist.v.list[2].v.list[i].v.obj);
+                //     for (i = 0; i <= names[0].v.num; i++) {
+                //         if (i == 0)
+                //             key_index.push_back(db_object_name(arglist.v.list[2].v.list[i].v.obj));
+                //         else if (names[i].type != TYPE_STR)
+                //             continue;
+                //         else
+                //             key_index.push_back(std::string(names[i].v.str));
+                //     }
+                //     break;
+                case TYPE_LIST:
+                    for (int x = 1; x <= arglist.v.list[2].v.list[i].v.list[0].v.num; x++) {
+                        if (arglist.v.list[2].v.list[i].v.list[x].type != TYPE_STR) {
+                            free_var(arglist);
+                            return make_error_pack(E_INVARG);
+                        }
+                        keys.push_back(std::string(arglist.v.list[2].v.list[i].v.list[x].v.str));
+                    }
+                    break;
+                default:
+                    free_var(arglist);
+                    return make_error_pack(E_INVARG);
+            }
+        }
     }
 
-    Var target_keys = arglist.v.list[0].v.num == 3 ? arglist.v.list[3] : arglist.v.list[2];
-    Var keys = compile_keys(&target_keys);
-    if (keys.v.list[0].v.num <= 0) {
-        free_var(arglist);
-        free_var(keys);
-        return make_error_pack(E_INVARG);
-    }
+    // Threshold for fuzzy matching
+    int threshold = nargs >= 4 ? arglist.v.list[4].v.num : server_int_option("match_threshold", 70);
 
-    // // Now that we have our keys parsed out, the only thing left to do is run a match.
-    std::vector<int> matches = complex_match(str_dup(arglist.v.list[1].v.str), &keys);
-    Var r = new_list(0);
+    // Now that we have our keys parsed out, the only thing left to do is run a match.
+    std::vector<int> matches = complex_match(std::string(arglist.v.list[1].v.str), keys, threshold);
+
+    Var r = new_list(matches.size());
     for (int i=0;i < matches.size();i++) {
-        r = listappend(r, var_ref(arglist.v.list[2].v.list[matches[i]]));
+        r.v.list[i + 1] = var_dup(arglist.v.list[2].v.list[matches[i] + 1]);
     }
-    free_var(keys);
+    return make_var_pack(r);
+}
+
+static package bf_ordinal(Var arglist, Byte next, void *vdata, Objid progr) {
+    std::string str = arglist.v.list[1].v.str;
+
+    int ordinal;
+    std::vector<std::string> tokens = ts::string::explode(str);
+
+    std::tie(ordinal, tokens[0]) = parse_ordinal(tokens[0]);
+    if(tokens[0] == "") tokens.erase(tokens.begin());
+    str = ts::string::join(tokens);
+
+    Var r = new_list(2);
+    r.v.list[1] = Var::new_int(ordinal);
+    r.v.list[2] = str_dup_to_var(str.c_str());
+
     free_var(arglist);
     return make_var_pack(r);
 }
@@ -1991,7 +1829,7 @@ register_list(void)
     register_function("match", 2, 3, bf_match, TYPE_STR, TYPE_STR, TYPE_ANY);
     register_function("rmatch", 2, 3, bf_rmatch, TYPE_STR, TYPE_STR, TYPE_ANY);
     register_function("substitute", 2, 2, bf_substitute, TYPE_STR, TYPE_LIST);
-    register_function("complex_match", 2, 3, bf_complex_match, TYPE_STR, TYPE_LIST, TYPE_LIST);
+    register_function("complex_match", 2, 4, bf_complex_match, TYPE_STR, TYPE_LIST, TYPE_LIST, TYPE_INT);
     register_function("index", 2, 4, bf_index,
                       TYPE_STR, TYPE_STR, TYPE_ANY, TYPE_INT);
     register_function("rindex", 2, 4, bf_rindex,
@@ -2000,6 +1838,10 @@ register_list(void)
     register_function("pluralize", 1, 2, bf_pluralize, TYPE_STR, TYPE_INT);
     register_function("strsub", 3, 4, bf_strsub,
                       TYPE_STR, TYPE_STR, TYPE_STR, TYPE_ANY);
+    register_function("ordinal", 1, 1, bf_ordinal,
+                      TYPE_STR);
     register_function("strtr", 3, 4, bf_strtr,
                       TYPE_STR, TYPE_STR, TYPE_STR, TYPE_ANY);
+
+    register_function("trim", 1, 2, bf_trim, TYPE_STR, TYPE_STR);
 }

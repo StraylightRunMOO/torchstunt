@@ -2,6 +2,7 @@
 
 #ifdef CURL_FOUND
 
+#include <string>
 #include <curl/curl.h>
 
 #include "curl.h"

@@ -30,8 +30,6 @@ typedef struct {
 
 extern Stream *new_stream(int size);
 extern void stream_add_char(Stream *, char);
-extern char stream_last_char(Stream *);
-extern char stream_first_char(Stream *);
 extern void stream_delete_char(Stream *);
 extern void stream_add_string(Stream *, const char *);
 extern void stream_printf(Stream *, const char *,...);
@@ -39,8 +37,6 @@ extern void free_stream(Stream *);
 extern char *stream_contents(Stream *);
 extern char *reset_stream(Stream *);
 extern int stream_length(Stream *);
-extern bool stream_cmp(Stream *, const char *);
-extern bool stream_empty_or_whitespace(Stream *);
 
 class stream_too_big: public std::exception
 {

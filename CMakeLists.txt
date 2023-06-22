@@ -152,6 +152,7 @@ IF(APPLE_SILICON_FOUND)
 ELSE()
     find_package(Threads REQUIRED)
 ENDIF()
+
 find_package(Nettle REQUIRED)
 find_package(Argon2 REQUIRED)
 find_package(PCRE)
@@ -266,6 +267,13 @@ include_directories(${ARGON2_INCLUDE_DIRS})
 target_link_libraries(moo ${ARGON2_LIBRARIES})
 include_directories(@{EXPAT_INCLUDE_DIRS})
 target_link_libraries(moo ${EXPAT_LIBRARIES})
+
+include(FetchContent)
+FetchContent_Declare(rapidfuzz
+  GIT_REPOSITORY https://github.com/maxbachmann/rapidfuzz-cpp.git
+  GIT_TAG main)
+FetchContent_MakeAvailable(rapidfuzz)
+target_link_libraries(moo rapidfuzz::rapidfuzz)
 
 if(CMAKE_USE_PTHREADS_INIT)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")

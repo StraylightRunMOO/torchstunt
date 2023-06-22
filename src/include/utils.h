@@ -19,6 +19,9 @@
 #define Utils_h 1
 
 #include <stdio.h>
+#include <set>
+#include <string>
+#include <vector>
 
 #include "config.h"
 #include "execute.h"
@@ -65,6 +68,76 @@ var_dup(Var v)
 	return complex_var_dup(v);
     else
 	return v;
+}
+
+
+namespace ts {
+    namespace var {
+
+        static inline Var make_string_var(std::string s) { return str_dup_to_var(s.c_str()); }
+
+        static inline std::vector<std::string> 
+        var_to_vector(Var v) {
+            std::vector<std::string> results;
+            switch (v.type) {
+                case TYPE_LIST:
+                    for (int i=1; i <= v.v.list[0].v.num;i++) {
+                        if (v.v.list[i].type != TYPE_STR) continue;
+                        results.emplace_back(std::string(v.v.list[i].v.str));
+                    }
+                    break;
+                case TYPE_STR:
+                    results.emplace_back(std::string(v.v.str));
+                    break;
+            }
+            return results;
+        }
+
+        template <typename T>
+        static inline Var vec_to_list(std::vector<T> v) {
+            auto n  = v.size();
+            Var ret = new_list(n);
+
+            if(n==0) return ret;
+
+            auto i = 0;
+
+            if(std::is_same<T, Objid>::value) {
+                for(T& x: v) {
+                    if(!valid(x)) continue;
+                    ret.v.list[++i] = Var::new_obj(x);
+                }
+            }
+
+            return ret;
+        }
+    }
+
+    namespace utils {
+        template <typename T>
+        static inline std::vector<T> merge_unique(std::vector<T> v1, std::vector<T> v2) {
+            auto sz = v1.size() + v2.size();
+
+            std::vector<T> v, r;
+
+            v.reserve(sz);
+            r.reserve(sz);
+
+            v.insert(v.end(), v1.begin(), v1.end());
+            v.insert(v.end(), v2.begin(), v2.end());
+
+            std::set<T> a;
+            for (auto & element : v) {
+                if(a.count(element)) continue;
+                a.insert(element);
+                r.emplace_back(element);
+            }
+
+            r.shrink_to_fit();
+
+            return r;
+        }
+    }
 }
 
 extern int is_true(Var v);

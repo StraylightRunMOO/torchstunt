@@ -18,7 +18,6 @@
 #include <assert.h>
 #include <errno.h>
 #include <list>
-#include <memory>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/time.h>       // getrusage
@@ -35,6 +34,7 @@
 #include <algorithm>
 #include <sstream>
 #include <fstream>
+#include <vector>
 
 #include <sys/types.h>      /* must be first on some systems */
 #include <signal.h>
@@ -2302,7 +2302,7 @@ main(int argc, char **argv)
 #endif
     db_shutdown();
     db_clear_ancestor_cache();
-    sql_shutdown();
+    //sql_shutdown();
     curl_shutdown();
     pcre_shutdown();
 
@@ -2927,13 +2927,13 @@ bf_connection_info(Var arglist, Byte next, void *vdata, Objid progr)
     }
 
     // Avoid some mallocs
-    static Var src_addr =   str_dup_to_var("source_address");
-    static Var src_ip =   str_dup_to_var("source_ip");
-    static Var src_port =   str_dup_to_var("source_port");
-    static Var dest_addr =  str_dup_to_var("destination_address");
-    static Var dest_ip =  str_dup_to_var("destination_ip");
-    static Var dest_port =  str_dup_to_var("destination_port");
-    static Var protocol =   str_dup_to_var("protocol");
+    static Var src_addr    = str_dup_to_var("source_address");
+    static Var src_ip      = str_dup_to_var("source_ip");
+    static Var src_port    = str_dup_to_var("source_port");
+    static Var dest_addr   = str_dup_to_var("destination_address");
+    static Var dest_ip     = str_dup_to_var("destination_ip");
+    static Var dest_port   = str_dup_to_var("destination_port");
+    static Var protocol    = str_dup_to_var("protocol");
     static Var is_outbound = str_dup_to_var("outbound");
 
     network_handle nh = h->nhandle;
@@ -2942,9 +2942,11 @@ bf_connection_info(Var arglist, Byte next, void *vdata, Objid progr)
     ret = mapinsert(ret, var_ref(src_addr), str_ref_to_var(network_source_connection_name(nh)));
     ret = mapinsert(ret, var_ref(src_port), Var::new_int(network_source_port(nh)));
     ret = mapinsert(ret, var_ref(src_ip), str_ref_to_var(network_source_ip_address(nh)));
+
     lock_connection_name_mutex(nh);
     ret = mapinsert(ret, var_ref(dest_addr), str_ref_to_var(network_connection_name(nh)));
     unlock_connection_name_mutex(nh);
+    
     ret = mapinsert(ret, var_ref(dest_port), Var::new_int(network_port(nh)));
     ret = mapinsert(ret, var_ref(dest_ip), str_ref_to_var(network_ip_address(nh)));
     ret = mapinsert(ret, var_ref(protocol), str_dup_to_var(network_protocol(nh)));
@@ -3086,18 +3088,17 @@ bf_unlisten(Var arglist, Byte next, void *vdata, Objid progr)
 }
 
 static package
-bf_listeners(Var arglist, Byte next, void *vdata, Objid progr)
-{   /* (find) */
-    const int nargs = arglist.v.list[0].v.num;
-    Var entry, list = new_list(0);
+bf_listeners(Var arglist, Byte next, void *vdata, Objid progr) {   /* (find) */
+    const auto nargs   = arglist.v.list[0].v.num;
+    Var entry, list    = new_list(0);
     bool find_listener = nargs == 1 ? true : false;
-    const Var find = find_listener ? arglist.v.list[1] : var_ref(zero);
+    const Var find     = find_listener ? arglist.v.list[1] : var_ref(zero);
     slistener *l;
 
-// Save the keys for later
+    // Save the keys for later
     static const Var object = str_dup_to_var("object");
-    static const Var port = str_dup_to_var("port");
-    static const Var print = str_dup_to_var("print_messages");
+    static const Var port   = str_dup_to_var("port");
+    static const Var print  = str_dup_to_var("print_messages");
 
     for (l = all_slisteners; l; l = l->next) {
         if (!find_listener || equality(find, (find.type == TYPE_OBJ) ? Var::new_obj(l->oid) : l->desc, 0)) {
@@ -3142,7 +3143,6 @@ bf_buffered_output_length(Var arglist, Byte next, void *vdata, Objid progr)
     return make_var_pack(r);
 }
 
-
 enum class token_op {
     TEXT,
     VERB,
@@ -3179,97 +3179,43 @@ const char* enum_to_c_str(token_op op) {
 
 #define COMMIT_AND_ADD(tokens, token) \
 do { \
-    if (!token->totally_empty()) tokens.push_back(std::unique_ptr<InputToken, TokenCleaner>(token));  \
-    token = new_token(token_op::TEXT); \
+    if (!token.totally_empty()) tokens.push_back(token);  \
+    token = {}; \
 } while (0)
 
-typedef struct {
-    token_op operation; // Current token operation.
-    Stream *content; // The content we've assembled so far...
-    Objid target;
-    Stream *postfix; // This is typically punctuation appended to the end of content
-    Stream *prefix; 
+struct InputToken {
+    token_op operation = token_op::TEXT; // Current token operation.
+    std::string content; // The content we've assembled so far...
+    Objid target = NOTHING;
+    std::string postfix; // This is typically punctuation appended to the end of content
+    std::string prefix; 
     
     bool empty() {
-        if (!this->content) return true;
-        return stream_length(this->content) == 0;
+        return this->content.empty();
     }
 
     // Called if there's really no content at all.
     bool totally_empty() {
-        if (!this->postfix) return true;
-        if (!this->prefix) return true;
-        return this->empty() && stream_length(this->postfix) == 0 && stream_length(this->prefix) == 0;
+        return this->empty() && this->postfix.empty() && this->prefix.empty();
     }
-} InputToken;
+};
 
-InputToken*
-new_token(token_op operation)
-{
-    InputToken *s = (InputToken *)mymalloc(sizeof(InputToken), M_INPUTTOKEN);
-
-    s->operation = operation;
-    s->content = new_stream(100);
-    s->target = NOTHING;
-    s->postfix = new_stream(1);
-    s->prefix = new_stream(1);
-
-    return s;
+static inline bool isPossessivePronoun(std::string word) {
+    std::vector<std::string> possessivePronouns = {"my", "your", "his", "her", "their", "whose"};
+    return (find(possessivePronouns.begin(), possessivePronouns.end(), word) != possessivePronouns.end());
 }
 
-void
-free_token(InputToken * s)
-{
-    if (s->content) free_stream(s->content);
-    if (s->postfix) free_stream(s->postfix);
-    if (s->prefix) free_stream(s->prefix);
-    myfree(s, M_INPUTTOKEN);
+static inline bool isReflexivePronoun(std::string word) {
+    std::vector<std::string> reflexivePronouns = {"myself", "yourself", "himself", "herself", "yourselves", "themselves"};
+    return (find(reflexivePronouns.begin(), reflexivePronouns.end(), word) != reflexivePronouns.end());
 }
 
-bool isPossessivePronoun(const char* word) {
-    const char* possessivePronouns[] = {"my", "your", "his", "her", "their", "whose"};
-    size_t numPossessivePronouns = sizeof(possessivePronouns) / sizeof(possessivePronouns[0]);
-    
-    for (size_t i = 0; i < numPossessivePronouns; i++) {
-        if (strcmp(word, possessivePronouns[i]) == 0) {
-            return true;
-        }
-    }
-    
-    return false;
+static inline bool isPronoun(std::string word) {
+    std::vector<std::string> pronouns = {"I", "me", "you", "he", "she", "they", "him", "her", "them", "myself", "yourself", "himself", "herself", "themselves"};
+    return isPossessivePronoun(word) || isReflexivePronoun(word) || (find(pronouns.begin(), pronouns.end(), word) != pronouns.end());
 }
 
-bool isReflexivePronoun(const char* word) {
-    const char* reflexivePronouns[] = {"myself", "yourself", "himself", "herself", "yourselves", "themselves"};
-    size_t numReflexivePronouns = sizeof(reflexivePronouns) / sizeof(reflexivePronouns[0]);
-    
-    for (size_t i = 0; i < numReflexivePronouns; i++) {
-        if (strcmp(word, reflexivePronouns[i]) == 0) {
-            return true;
-        }
-    }
-    
-    return false;
-}
-
-bool isPronoun(const char* word) {
-    const char* pronouns[] = {"I", "me", "you", "he", "she", "they", "him", "her", "them", "myself", "yourself", "himself", "herself", "themselves"};
-    size_t numPronouns = sizeof(pronouns) / sizeof(pronouns[0]);
-    
-    if (isPossessivePronoun(word) || isReflexivePronoun(word)) {
-        return true;
-    }
-    
-    for (size_t i = 0; i < numPronouns; i++) {
-        if (strcmp(word, pronouns[i]) == 0) {
-            return true;
-        }
-    }
-    
-    return false;
-}
-
-static bool isGrammaticalPunctuation(char c) {
+static inline bool isGrammaticalPunctuation(char c) {
     std::string punctuationMarks = ".?!,;:'./–&$%@";
     
     // Loop through each character in the punctuationMarks string
@@ -3282,31 +3228,20 @@ static bool isGrammaticalPunctuation(char c) {
     return false; // Character is not a punctuation mark
 }
 
-struct TokenCleaner {
-    void operator()(InputToken* token) {
-        if (!token) return;
-        free_token(token);
-    }
-};
-
-static package
-bf_tokenize_input(Var arglist, Byte next, void *vdata, Objid progr)
+static package 
+do_tokenize_input(Objid speaker, std::string input_string, std::vector<Objid> object_list) 
 {
-    int nargs = arglist.v.list[0].v.num;
-    Objid speaker = nargs >= 1 ? arglist.v.list[1].v.obj : 0;
-    const char* input_string = nargs >= 2 ? arglist.v.list[2].v.str : "";
+    std::list<InputToken> tokens;
+    int input_length = input_string.length();
 
-    std::list<std::unique_ptr<InputToken, TokenCleaner>> tokens;
-    int input_length = strlen(input_string);
-
-    InputToken* token = new_token(token_op::TEXT); // our current token    
+    InputToken token; // our current token    
     Objid subject = NOTHING;
-    Objid match = NOTHING;
-    for (int i = 0; i <= input_length; i++) {
-        // I do <= to input length so I don't have to do a cleanup stage of the parser.
-        char c = i == input_length ? '\0' : input_string[i]; // Current character
+    Objid match   = NOTHING;
+
+    for (int i = 0; i < input_length; i++) {
+        char c = input_string[i]; // Current character
         // Top level is our MODE
-        if (token->operation == token_op::SPEECH) {
+        if (token.operation == token_op::SPEECH) {
             // Speech mode is fairly closed loop and simple. We're just
             // gobbling up all speech until we reach our end character.
             if (c == '"') {
@@ -3315,14 +3250,14 @@ bf_tokenize_input(Var arglist, Byte next, void *vdata, Objid progr)
                 continue;
             }
             // Gobble
-            stream_add_char(token->content, c);
+            token.content += c;
             continue;
         }
         // This is probably TEXT mode. It's the meat of the parser.
         // Very first we check if we're entering speech mode as it's tbh the easiest
         if (c == '"') {
-          if (!token->totally_empty()) COMMIT_AND_ADD(tokens, token); // Reboot token if we we're on a word
-          token = new_token(token_op::SPEECH);
+          if (!token.totally_empty()) COMMIT_AND_ADD(tokens, token); // Reboot token if we we're on a word
+          token = {token_op::SPEECH};
           continue;
         }
         bool is_punct = std::ispunct(c) && c != '-' && c != '&' && c != '-';
@@ -3335,154 +3270,89 @@ bf_tokenize_input(Var arglist, Byte next, void *vdata, Objid progr)
         //
         // EXAMPLE: .look => prefix '.', word 'look'
         // EXAMPLE: Foo, => word 'Foo', postfix ','
-        if (c != '\0' && !is_space && !is_punct) {
+        if (!is_space && !is_punct) {
             // In TEXT mode any alphanumeric character just gets added to content.
-            stream_add_char(token->content, c);
+            token.content += c;
             continue;
         }
 
         // ATTENTION: We need to add punctuation to prefix/postfix BEFORE processing
         // Because that's how some of the special functions match!!!
-        if (c != '\0' && is_punct) {
-            if (token->empty()) {
-                stream_add_char(token->prefix, c);
+        if (is_punct) {
+            if (token.empty()) {
+                token.prefix += c;
                 continue;
             }
             else 
             {
-                stream_add_char(token->postfix, c);
+                token.postfix += c;
                 // Subject reset
                 if (c == '.')
                     subject = NOTHING;
             }
         }
 
-        if (c != '\0' && token->empty()) {
+        if (token.empty()) {
             // Optimization guard check
-            stream_add_char(token->prefix, c);
+            token.prefix += c;
             continue;
         }
+
 
         // At this point our token might look like...
         // prefix '.', word 'look'[, postfix ',']
         // prefix '%<', word 'look', postfix '>'
         // word 'Foo'[, postfix ',']
-        if (stream_length(token->prefix) != 0 && stream_last_char(token->prefix) == '.')
+        if (!token.prefix.empty() && token.prefix.back() == '.')
         {
-            token->operation = token_op::VERB;
-            stream_delete_char(token->prefix);
-        } else if (stream_cmp(token->prefix, "%<") && stream_cmp(token->postfix, ">")) {
-            token->operation = token_op::VERB;
-            reset_stream(token->prefix);
-            reset_stream(token->postfix);
-        } else if (stream_cmp(token->prefix, "%")) {
-            token->operation = token_op::SUBSTITUTION;
-            reset_stream(token->prefix);
-        } else if (stream_cmp(token->prefix, "#") && atoi(str_dup(stream_contents(token->content))) > 0) {
-            // We'll always resolve #OBJs into targets
-            Objid match = atoi(str_dup(stream_contents(token->content)));
-            subject = match;
-            stream_delete_char(token->prefix);
-            reset_stream(token->content);
-            stream_add_string(token->content, str_dup(db_object_name(match)));
-            token->operation = token_op::TARGET;
-            token->target = subject;
-            if (c == '\'' && (input_length > i + 1) && input_string[i+1] == 's') {
-                token->operation = token_op::POSSESSIVE_TARGET;
-                if (stream_length(token->postfix) > 0) stream_delete_char(token->postfix); // This clear's the possessive from the buffer.
-                ++i; // This will clear the oncoming s.
-            }
-            if (c == ' ') stream_add_char(token->postfix, c);
-            COMMIT_AND_ADD(tokens, token);
-            continue;
-        } else if (std::isupper(stream_first_char(token->content)) 
-            && stream_length(token->content) > 3 
-            && valid(match = match_object(speaker, stream_contents(token->content)))) {
+            token.operation = token_op::VERB;
+            token.prefix.pop_back();
+        } else if (token.prefix == "%<" && token.postfix == ">") {
+            token.operation = token_op::VERB;
+            token.prefix.clear();
+            token.postfix.clear();
+        } else if (token.prefix == "%") {
+            token.operation = token_op::SUBSTITUTION;
+            token.prefix.clear();
+        } else if (token.content.length() >= 3 && token_match(&match, speaker, token.content.c_str(), object_list)) {
             // If we match this we found something in the local area that matches.
-            subject = match;
-            token->operation = token_op::TARGET;
-            // we're going to aggressively match forward now for multi-word matches...
-            if (c == ' ') {
-                Objid read_ahead_match = match;
-                while (valid(read_ahead_match)) {
-                    // Sorry to anyone who has to ever read this code again.
-                    Stream *read_ahead = new_stream(100);
-                    stream_add_string(read_ahead, stream_contents(token->content));
-                    stream_add_char(read_ahead, c);
-                    int ri = i + 1;
-                    for (ri; ri < input_length; ri++) {
-                        const char rc = input_string[ri];
-                        if (rc == ' ') {
-                            read_ahead_match = match_object(speaker, stream_contents(read_ahead));
-                            stream_add_char(read_ahead, rc);
-                            break;
-                        } else if (std::ispunct(rc)) {
-                            ri--;
-                            break;
-                        }
-                        stream_add_char(read_ahead, rc);
-                    }
-                    if (ri == i) break;
-                    if (ri == input_length) read_ahead_match = match_object(speaker, stream_contents(read_ahead));
-                    if (valid(read_ahead_match)) {
-                        // Move the cursor ahead.
-                        i = ri + 1;
-                        c = input_string[i];
-                        reset_stream(token->content);
-                        stream_add_string(token->content, stream_contents(read_ahead));
-                    }
-                    free_stream(read_ahead);
-                }
-            }
+            token.operation = token_op::TARGET;
+            token.target    = match;
+
             if (c == '\'' && (input_length > i + 1) && input_string[i+1] == 's') {
-                token->operation = token_op::POSSESSIVE_TARGET;
-                if (stream_length(token->postfix) > 0) stream_delete_char(token->postfix); // This clear's the possessive from the buffer.
-                ++i; // This will clear the oncoming s.
+              token.operation = token_op::POSSESSIVE_TARGET;
+              token.postfix.pop_back(); // This clear's the possessive from the buffer.
+              ++i; // This will clear the oncoming s.
             }
-            token->target = subject;
-            if (c == ' ') stream_add_char(token->postfix, c);
-            COMMIT_AND_ADD(tokens, token);
-            continue;
-        } else if (stream_length(token->prefix) != 0 && stream_last_char(token->prefix) == '/') {
+        } else if (!token.prefix.empty() && token.prefix.back() == '/') {
             // This is probably a macro.
-            token->operation = token_op::MACRO;
-            stream_delete_char(token->prefix);
-        } else if (isPronoun(stream_contents(token->content))) {
+            token.operation = token_op::MACRO;
+            token.prefix.pop_back();
+        } else if (isPronoun(token.content)) {
             // token = token.commit_and_clone(tokens);
-            if (stream_cmp(token->content, "I") || stream_cmp(token->content, "my") || stream_cmp(token->content, "me") || stream_cmp(token->content, "myself")) subject = speaker;
-            token->operation = token_op::TARGET;
-            token->target = subject;
-            if (isPossessivePronoun(stream_contents(token->content)))
-                token->operation = token_op::POSSESSIVE_TARGET;
-            else if (isReflexivePronoun(stream_contents(token->content)))
-                token->operation = token_op::REFLEXIVE_TARGET;
+            if (token.content == "I" || token.content == "my" || token.content == "me" || token.content == "myself") subject = speaker;
+            token.operation = token_op::TARGET;
+            token.target = subject;
+            if (isPossessivePronoun(token.content))
+                token.operation = token_op::POSSESSIVE_TARGET;
+            else if (isReflexivePronoun(token.content))
+                token.operation = token_op::REFLEXIVE_TARGET;
         }
 
         // Finally if we're at a space character or a non-text operation we separate
         // into a new token.
         // This is done mostly for convenience as it lets us nom word by word and is readable.
-        if (c == '\0') {
+        if (is_space) {
+            token.postfix += c;
             COMMIT_AND_ADD(tokens, token);
-        } else if (is_space) {
-            stream_add_char(token->postfix, c);
+        } else if (token.operation != token_op::TEXT) {
             COMMIT_AND_ADD(tokens, token);
-        } else if (stream_length(token->postfix) != 0 && std::ispunct(stream_last_char(token->postfix))) {
-            // aggressive read ahead to catch any other useless characters...
-            int ri = i + 1;
-            for (ri; ri < input_length; ri++) {
-                c = input_string[ri];
-                if (!std::isspace(c) && !std::ispunct(c)) {
-                    i = ri - 1;
-                    break;
-                } else if (c == '/' || c == '%' || c == '.' || c == '\"') {
-                    i = ri - 1;
-                    break;
-                }
-                stream_add_char(token->postfix, c);
-            }
+        } else if (!token.postfix.empty() && std::ispunct(token.postfix.back())) {
             COMMIT_AND_ADD(tokens, token);
         }
     }
+
+    if (!token.totally_empty()) COMMIT_AND_ADD(tokens, token);
 
     // This is an optimization pass.
     // Essentially every text token can fall into the previous text token
@@ -3490,19 +3360,20 @@ bf_tokenize_input(Var arglist, Byte next, void *vdata, Objid progr)
     for(auto it = std::next(tokens.begin()); it != tokens.end(); /* no increment here */) {
         auto& curr_token = *it;
         auto& prev_token = *std::prev(it);
-        if (curr_token->operation == token_op::TEXT && curr_token->empty()) {
-            stream_add_string(prev_token->postfix, stream_contents(curr_token->prefix));
-            stream_add_string(prev_token->postfix, stream_contents(curr_token->postfix));
+        if (curr_token.operation == token_op::TEXT && curr_token.empty()) {
+            prev_token.postfix += curr_token.prefix;
+            prev_token.postfix += curr_token.postfix;
             it = tokens.erase(it);  // erase and move to the next token
         }
-        else if(prev_token->operation == token_op::TEXT && curr_token->operation == token_op::TEXT) {
-            if(stream_empty_or_whitespace(prev_token->postfix) &&  stream_empty_or_whitespace(curr_token->prefix)) {
-                stream_add_string(prev_token->content, stream_contents(prev_token->postfix));
-                stream_add_string(prev_token->content, stream_contents(curr_token->prefix));
-                stream_add_string(prev_token->content, stream_contents(curr_token->content));
-                reset_stream(prev_token->postfix);
-                stream_add_string(prev_token->postfix, stream_contents(curr_token->postfix));
-                reset_stream(curr_token->postfix);
+        else if(prev_token.operation == token_op::TEXT && curr_token.operation == token_op::TEXT) {
+            bool prev_postfix_empty_or_whitespace = prev_token.postfix.empty() || std::all_of(prev_token.postfix.begin(), prev_token.postfix.end(), ::isspace);
+            bool curr_prefix_empty_or_whitespace = curr_token.prefix.empty() || std::all_of(curr_token.prefix.begin(), curr_token.prefix.end(), ::isspace);
+
+            if(prev_postfix_empty_or_whitespace && curr_prefix_empty_or_whitespace) {
+                prev_token.content += prev_token.postfix;
+                prev_token.content += curr_token.prefix;
+                prev_token.content += curr_token.content;
+                prev_token.postfix = curr_token.postfix;
                 it = tokens.erase(it);  // erase and move to the next token
             } else {
                 ++it;  // just move to the next token
@@ -3512,61 +3383,74 @@ bf_tokenize_input(Var arglist, Byte next, void *vdata, Objid progr)
         }
     }
 
+
+    // Save the keys for later
+    static const Var type    = str_dup_to_var("type");
+    static const Var content = str_dup_to_var("content");
+    static const Var prefix  = str_dup_to_var("prefix");
+    static const Var postfix = str_dup_to_var("postfix");
+    static const Var target  = str_dup_to_var("target");
+
     // Here's where we disassemble this weird datastructure I've made into vars.
     Var results = new_list(0);
-    for (const auto& token : tokens) {
+    for (InputToken token : tokens) {
         Var result = new_map();
-        result = mapinsert(result, str_dup_to_var("type"), str_dup_to_var(enum_to_c_str(token->operation)));
-        if (stream_length(token->content) != 0)
-            result = mapinsert(result, str_dup_to_var("content"), str_dup_to_var(stream_contents(token->content)));
-        if (stream_length(token->prefix) != 0)
-          result = mapinsert(result, str_dup_to_var("prefix"), str_dup_to_var(stream_contents(token->prefix)));
-        if (stream_length(token->postfix) != 0)
-          result = mapinsert(result, str_dup_to_var("postfix"), str_dup_to_var(stream_contents(token->postfix)));
-        if (token->target != NOTHING) {
-            Var obj;
-            obj.type = TYPE_OBJ;
-            obj.v.obj = token->target;
-            result = mapinsert(result, str_dup_to_var("target"), obj);
+        
+        result = mapinsert(result, var_ref(type), ts::var::make_string_var(enum_to_c_str(token.operation)));
+        
+        if (!token.content.empty())
+            result = mapinsert(result, var_ref(content), ts::var::make_string_var(token.content.c_str()));
+        if (!token.prefix.empty())
+          result = mapinsert(result, var_ref(prefix), ts::var::make_string_var(token.prefix.c_str()));
+        if (!token.postfix.empty())
+          result = mapinsert(result, var_ref(postfix), ts::var::make_string_var(token.postfix.c_str()));
+        if (token.target != NOTHING) {
+            result = mapinsert(result, var_ref(target), Var::new_obj(token.target));
         }
+
         results = listappend(results, result);
     }
 
-    return make_var_pack(results);
+    return make_var_pack(var_ref(results));
+}
+
+static package 
+bf_tokenize_input(Var arglist, Byte next, void *vdata, Objid progr) 
+{
+    auto nargs    = arglist.v.list[0].v.num;
+    Objid speaker = arglist.v.list[1].v.obj;
+    std::string s = arglist.v.list[2].v.str;
+
+    free_var(arglist);
+    return do_tokenize_input(speaker, s, nearby_objects(speaker));
 }
 
 void
 register_server(void)
 {
-    register_function("server_version", 0, 1, bf_server_version, TYPE_ANY);
-    register_function("renumber", 1, 1, bf_renumber, TYPE_OBJ);
-    register_function("reset_max_object", 0, 0, bf_reset_max_object);
-    register_function("memory_usage", 0, 0, bf_memory_usage);
-    register_function("usage", 0, 0, bf_usage);
-    register_function("panic", 0, 1, bf_panic, TYPE_STR);
-    register_function("shutdown", 0, 1, bf_shutdown, TYPE_STR);
-    register_function("dump_database", 0, 0, bf_dump_database);
-    register_function("db_disk_size", 0, 0, bf_db_disk_size);
-    register_function("open_network_connection", 2, 3, bf_open_network_connection,
-                      TYPE_STR, TYPE_INT, TYPE_MAP);
-    register_function("connected_players", 0, 1, bf_connected_players,
-                      TYPE_ANY);
-    register_function("connected_seconds", 1, 1, bf_connected_seconds,
-                      TYPE_OBJ);
-    register_function("idle_seconds", 1, 1, bf_idle_seconds, TYPE_OBJ);
-    register_function("connection_name", 1, 2, bf_connection_name, TYPE_OBJ, TYPE_INT);
-    register_function("notify", 2, 4, bf_notify, TYPE_OBJ, TYPE_STR, TYPE_ANY, TYPE_ANY);
-    register_function("boot_player", 1, 1, bf_boot_player, TYPE_OBJ);
-    register_function("set_connection_option", 3, 3, bf_set_connection_option,
-                      TYPE_OBJ, TYPE_STR, TYPE_ANY);
-    register_function("connection_options", 1, 2, bf_connection_options,
-                      TYPE_OBJ, TYPE_STR);
-    register_function("connection_info", 1, 1, bf_connection_info, TYPE_OBJ);
-    register_function("connection_name_lookup", 1, 2, bf_name_lookup, TYPE_OBJ, TYPE_ANY);
-    register_function("listen", 2, 3, bf_listen, TYPE_OBJ, TYPE_ANY, TYPE_MAP);
-    register_function("unlisten", 1, 2, bf_unlisten, TYPE_ANY, TYPE_ANY);
-    register_function("listeners", 0, 1, bf_listeners, TYPE_ANY);
-    register_function("buffered_output_length", 0, 1,
-                      bf_buffered_output_length, TYPE_OBJ);
-    register_function("tokenize_input", 2, 2, bf_tokenize_input, TYPE_OBJ, TYPE_STR);
+    register_function("server_version",          0, 1, bf_server_version,           TYPE_ANY);
+    register_function("renumber",                1, 1, bf_renumber,                 TYPE_OBJ);
+    register_function("reset_max_object",        0, 0, bf_reset_max_object);
+    register_function("memory_usage",            0, 0, bf_memory_usage);
+    register_function("usage",                   0, 0, bf_usage);
+    register_function("panic",                   0, 1, bf_panic,                    TYPE_STR);
+    register_function("shutdown",                0, 1, bf_shutdown,                 TYPE_STR);
+    register_function("dump_database",           0, 0, bf_dump_database);
+    register_function("db_disk_size",            0, 0, bf_db_disk_size);
+    register_function("open_network_connection", 2, 3, bf_open_network_connection,  TYPE_STR, TYPE_INT, TYPE_MAP);
+    register_function("connected_players",       0, 1, bf_connected_players,        TYPE_ANY);
+    register_function("connected_seconds",       1, 1, bf_connected_seconds,        TYPE_OBJ);
+    register_function("idle_seconds",            1, 1, bf_idle_seconds,             TYPE_OBJ);
+    register_function("connection_name",         1, 2, bf_connection_name,          TYPE_OBJ, TYPE_INT);
+    register_function("notify",                  2, 4, bf_notify,                   TYPE_OBJ, TYPE_STR, TYPE_ANY, TYPE_ANY);
+    register_function("boot_player",             1, 1, bf_boot_player,              TYPE_OBJ);
+    register_function("set_connection_option",   3, 3, bf_set_connection_option,    TYPE_OBJ, TYPE_STR, TYPE_ANY);
+    register_function("connection_options",      1, 2, bf_connection_options,       TYPE_OBJ, TYPE_STR);
+    register_function("connection_info",         1, 1, bf_connection_info,          TYPE_OBJ);
+    register_function("connection_name_lookup",  1, 2, bf_name_lookup,              TYPE_OBJ, TYPE_ANY);
+    register_function("listen",                  2, 3, bf_listen,                   TYPE_OBJ, TYPE_ANY, TYPE_MAP);
+    register_function("unlisten",                1, 2, bf_unlisten,                 TYPE_ANY, TYPE_ANY);
+    register_function("listeners",               0, 1, bf_listeners,                TYPE_ANY);
+    register_function("buffered_output_length",  0, 1, bf_buffered_output_length,   TYPE_OBJ);
+    register_function("tokenize_input",          2, 2, bf_tokenize_input, TYPE_OBJ, TYPE_STR);
 }

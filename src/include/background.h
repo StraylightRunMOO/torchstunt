@@ -6,7 +6,7 @@
 #include "functions.h"
 #include "thpool.h"        // thread pool
 
-#define MAX_BACKGROUND_THREADS  20      /* The total number threads allowed to be run from within the MOO.
+#define MAX_BACKGROUND_THREADS  0      /* The total number threads allowed to be run from within the MOO.
                                            Can be overridden with $server_options.max_background_threads */
 
 typedef struct background_waiter {
