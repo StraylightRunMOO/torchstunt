@@ -1,4 +1,4 @@
-FROM debian:buster-slim as builder
+FROM debian:12.2-slim as builder
 RUN apt update && apt install -y libboost-all-dev libpq-dev libpq5 wget bison gperf libsqlite3-dev libexpat1-dev git libaspell-dev cmake libpcre3-dev nettle-dev g++ libcurl4-openssl-dev libargon2-dev libssl-dev 
 
 # Need to upgrade to a better CMAKE version, as we're super cool bleeding edge neato.
@@ -13,7 +13,7 @@ RUN ln -s /opt/cmake-3.24.0-rc4-linux-x86_64/bin/* /usr/local/bin
 RUN git clone https://github.com/jtv/libpqxx.git
 WORKDIR /opt/libpqxx
 RUN git checkout 7.6
-RUN pwd ;  cmake . && make -j2 && make install
+RUN pwd ;  cmake -DCMAKE_BUILD_TYPE=LeakCheck . && make -j2 && make install
 
 # Moving on to building toaststunt...
 WORKDIR /toaststunt
@@ -27,7 +27,7 @@ RUN pwd ;  mkdir build && cd build && cmake ../
 RUN cd /toaststunt/build && make -j2
 
 # Make an entirely new image...
-FROM debian:buster-slim 
+FROM debian:12.2-slim 
 
 # Bring over only necessary packages
 RUN apt update && apt install -y tini libpq-dev libpq5 libsqlite3-dev libexpat1-dev libaspell-dev libpcre3-dev nettle-dev libcurl4-openssl-dev libargon2-dev libssl-dev 
@@ -40,12 +40,9 @@ COPY --from=builder \
      /usr/local/lib/libpqxx* \
      /usr/local/lib/
 
-# Add Tini
-ENTRYPOINT ["/tini", "--"]
-
 # A special restart which output on stdout is needed for docker
 COPY docker_restart.sh /toaststunt/
 RUN chmod +x /toaststunt/docker_restart.sh
 EXPOSE 7777
 WORKDIR /toaststunt/
-CMD ["./docker_restart", "/cores/${CORE_TO_LOAD}"]
+ENTRYPOINT ./docker_restart.sh /cores/$CORE_TO_LOAD

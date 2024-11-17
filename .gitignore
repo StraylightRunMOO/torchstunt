@@ -10,6 +10,7 @@ version_src*.h
 keywords.c
 *.o
 moo
+bin
 \#*\#
 .\#*
 backups
@@ -21,7 +22,6 @@ xcode
 Makefile.in.bak
 keywords.cc
 build
-.vscode
 test/executables/true
 test/executables/sleep
 test/executables/echo

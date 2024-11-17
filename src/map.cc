@@ -58,27 +58,6 @@
   header comment, such as this one.
 */
 
-#define HEIGHT_LIMIT 64     /* Tallest allowable tree */
-
-struct rbtree {
-    rbnode *root;       /* Top of the tree */
-    size_t size;        /* Number of items */
-};
-
-struct rbnode {
-    Var key;
-    Var value;
-    int red;            /* Color (1=red, 0=black) */
-    rbnode *link[2];        /* Left (0) and right (1) links */
-};
-
-struct rbtrav {
-    rbtree *tree;       /* Paired tree */
-    rbnode *it;         /* Current node */
-    rbnode *path[HEIGHT_LIMIT]; /* Traversal path */
-    size_t top;         /* Top of stack */
-};
-
 static int
 node_compare(const rbnode *node1, const rbnode *node2, int case_matters)
 {
@@ -544,7 +523,7 @@ rbmove(rbtrav *trav, int dir)
 /*
  * Initializes a traversal object to the smallest valued node.
  */
-static rbnode *
+rbnode *
 rbtfirst(rbtrav *trav, rbtree *tree)
 {
     return rbstart(trav, tree, 0);  /* Min value */
@@ -553,7 +532,7 @@ rbtfirst(rbtrav *trav, rbtree *tree)
 /*
  * Initializes a traversal object to the largest valued node.
  */
-static rbnode *
+rbnode *
 rbtlast(rbtrav *trav, rbtree *tree)
 {
     return rbstart(trav, tree, 1);  /* Max value */
@@ -562,7 +541,7 @@ rbtlast(rbtrav *trav, rbtree *tree)
 /*
  * Traverses to the next value in ascending order.
  */
-static rbnode *
+rbnode *
 rbtnext(rbtrav *trav)
 {
     return rbmove(trav, 1); /* Toward larger items */
@@ -571,7 +550,7 @@ rbtnext(rbtrav *trav)
 /*
  * Traverses to the next value in descending order.
  */
-static rbnode *
+rbnode *
 rbtprev(rbtrav *trav)
 {
     return rbmove(trav, 0); /* Toward smaller items */
@@ -644,12 +623,15 @@ map_dup(Var map)
 int
 map_sizeof(rbtree *tree)
 {
+#ifdef MEMO_SIZE
+    var_metadata *metadata = ((var_metadata*)tree) - 1;
+#endif
     rbtrav trav;
     const rbnode *pnode;
     int size;
 
-#ifdef MEMO_VALUE_BYTES
-    if ((size = (((int *)(tree))[MEMO_OFFSET])))
+#ifdef MEMO_SIZE
+    if ((size = metadata->size))
         return size;
 #endif
 
@@ -660,8 +642,8 @@ map_sizeof(rbtree *tree)
         size += value_bytes(pnode->value);
     }
 
-#ifdef MEMO_VALUE_BYTES
-    (((int *)(tree))[MEMO_OFFSET]) = size;
+#ifdef MEMO_SIZE
+    metadata->size = size;
 #endif
 
     return size;
@@ -686,9 +668,10 @@ mapinsert(Var map, Var key, Var value)
         free_var(map);
     }
 
-#ifdef MEMO_VALUE_BYTES
+#ifdef MEMO_SIZE
     /* reset the memoized size */
-    ((int *)(_new.v.tree))[MEMO_OFFSET] = 0;
+    var_metadata *metadata = ((var_metadata*)_new.v.tree) - 1;
+    metadata->size = 0;
 #endif
 
     rbnode node;
@@ -705,6 +688,16 @@ mapinsert(Var map, Var key, Var value)
 #endif
 
     return _new;
+}
+
+const rbnode *
+mapstrlookup(Var map, const char *key, Var *value, int case_matters)
+{
+    Var tmp;
+    tmp.type = TYPE_STR;
+    tmp.v.str = key;
+
+    return maplookup(map, tmp, value, case_matters);
 }
 
 const rbnode *
@@ -997,9 +990,10 @@ bf_mapdelete(Var arglist, Byte next, void *vdata, Objid progr)
 
     r = var_refcount(map) == 1 ? var_ref(map) : map_dup(map);
 
-#ifdef MEMO_VALUE_BYTES
+#ifdef MEMO_SIZE
     /* reset the memoized size */
-    ((int *)(r.v.tree))[MEMO_OFFSET] = 0;
+    var_metadata *metadata = ((var_metadata*)r.v.tree) - 1;
+    metadata->size = 0;
 #endif
 
     rbnode node;
